@@ -1,20 +1,45 @@
-# Base image Python
-FROM python:3.11-slim
+##############################
+# Stage 1: Train the model
+##############################
+FROM python:3.11-slim AS trainer
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements
+# Copy and install dependencies
 COPY requirements.txt .
-
-# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy entire project
-COPY . .
+# Copy training code + data
+COPY train_salary_model.py .
+COPY data.csv .
 
-# Expose port Flask
+# Run training → sinh file .pkl
+RUN python train_salary_model.py
+
+
+##############################
+# Stage 2: Run Flask backend
+##############################
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies again
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend source code
+COPY app.py .
+COPY utils.py .        # nếu có
+COPY preprocess.py .   # nếu có
+
+# Copy trained models from stage 1
+COPY --from=trainer /app/*.pkl ./
+
+
+# Render uses PORT env variable
+ENV PORT=5000
+
 EXPOSE 5000
 
-# Command to run backend
 CMD ["python", "app.py"]
