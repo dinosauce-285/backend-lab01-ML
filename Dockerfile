@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy training code + data
 COPY train_salary_model.py .
-COPY data.csv .
+COPY Salary_Data.csv .
 
 # Run training → sinh file .pkl
 RUN python train_salary_model.py
