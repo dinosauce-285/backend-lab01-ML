@@ -16,10 +16,16 @@ scaler_dict = None
 education_map = None
 top_n_jobs = None
 FEATURE_COLUMNS_ORDER = None
+best_model_name = None
+
+# Cho Polynomial Regression
+poly2_transformer = None
+scaler_poly2_dict = None
 
 def load_models():
     """Load all saved model objects"""
     global model, scaler_dict, education_map, top_n_jobs, FEATURE_COLUMNS_ORDER
+    global best_model_name, poly2_transformer, scaler_poly2_dict
     
     try:
         model = joblib.load('best_salary_model.pkl')
@@ -27,20 +33,23 @@ def load_models():
         education_map = joblib.load('education_map.pkl')
         top_n_jobs = joblib.load('top_n_jobs.pkl')
         FEATURE_COLUMNS_ORDER = joblib.load('model_features_order.pkl')
+        best_model_name = joblib.load('best_model_name.pkl')
+        
+        # Load polynomial objects nếu có
+        try:
+            poly2_transformer = joblib.load('poly2_transformer.pkl')
+            scaler_poly2_dict = joblib.load('scaler_poly2_dict.pkl')
+            print("Loaded Polynomial Regression objects")
+        except FileNotFoundError:
+            print("No polynomial objects found (not using Poly model)")
         
         print("="*70)
         print("MODEL LOADING STATUS")
         print("="*70)
-        print(f"Model: {type(model).__name__}")
+        print(f"Best Model: {best_model_name}")
+        print(f"Model Type: {type(model).__name__}")
         print(f"Scalers: {list(scaler_dict.keys())}")
-        
-        print("\nScaler parameters:")
-        for col, scaler in scaler_dict.items():
-            print(f"  {col}: mean={scaler.mean_[0]:.2f}, std={scaler.scale_[0]:.2f}")
-        
-        print(f"\nEducation levels: {list(education_map.keys())}")
-        print(f"Top jobs ({len(top_n_jobs)}): {list(top_n_jobs)}")
-        print(f"Features ({len(FEATURE_COLUMNS_ORDER)})")
+        print(f"Features: {len(FEATURE_COLUMNS_ORDER)} columns")
         print("="*70)
         print("All models loaded successfully!\n")
         
@@ -69,6 +78,7 @@ def home():
         'status': 'running',
         'service': 'Salary Prediction API',
         'model_loaded': model is not None,
+        'best_model': best_model_name,
         'features_count': len(FEATURE_COLUMNS_ORDER) if FEATURE_COLUMNS_ORDER else 0
     })
 
@@ -84,7 +94,7 @@ def predict_salary():
     print("NEW PREDICTION REQUEST")
     print("="*70)
     
-    if any(x is None for x in [model, scaler_dict, education_map, top_n_jobs, FEATURE_COLUMNS_ORDER]):
+    if any(x is None for x in [model, education_map, top_n_jobs, FEATURE_COLUMNS_ORDER]):
         print("ERROR: Models not loaded properly")
         return jsonify({'error': 'Models not loaded properly'}), 500
 
@@ -96,9 +106,6 @@ def predict_salary():
         for field in required_fields:
             if field not in data:
                 return jsonify({'error': f'Missing required field: {field}'}), 400
-
-        input_df = pd.DataFrame(columns=FEATURE_COLUMNS_ORDER)
-        input_df.loc[0] = 0.0 
 
         age = float(data['Age'])
         years_exp = float(data['Years of Experience'])
@@ -119,49 +126,110 @@ def predict_salary():
                 'error': f'Invalid education level: {education}',
                 'valid_levels': list(education_map.keys())
             }), 400
+
+        # ========================================================================
+        # XỬ LÝ THEO TỪNG LOẠI MODEL
+        # ========================================================================
         
-        if 'Education_Encoded' in input_df.columns:
-            input_df.loc[0, 'Education_Encoded'] = float(edu_encoded)
+        if best_model_name == "Simple Linear Regression":
+            # Chỉ cần Years of Experience
+            input_df = pd.DataFrame({
+                'Years of Experience': [years_exp]
+            })
+            
+        elif best_model_name == "Polynomial Regression (Degree 2)":
+            print("\n🔵 Using Polynomial Regression (Degree 2)")
+            
+            # Bước 1: Tạo base dataframe
+            base_data = {
+                'Education_Encoded': [float(edu_encoded)]
+            }
+            
+            # Thêm Gender dummies
+            base_data['Gender_Male'] = [1.0 if gender == 'Male' else 0.0]
+            base_data['Gender_Other'] = [1.0 if gender == 'Other' else 0.0]
+            
+            # Thêm Job dummies
+            job_grouped = job if job in top_n_jobs else 'Other'
+            for col in FEATURE_COLUMNS_ORDER:
+                if col.startswith('Job_'):
+                    job_name = col[4:]
+                    base_data[col] = [1.0 if job_name == job_grouped else 0.0]
+            
+            input_df = pd.DataFrame(base_data)
+            
+            # Bước 2: Tạo polynomial features từ Age và Years of Experience
+            poly_input = np.array([[age, years_exp]])
+            poly_features = poly2_transformer.transform(poly_input)
+            poly_feature_names = poly2_transformer.get_feature_names_out(['Age', 'Years of Experience'])
+            
+            # Tạo DataFrame cho polynomial features
+            poly_df = pd.DataFrame(poly_features, columns=poly_feature_names)
+            
+            # Bước 3: Scaling các polynomial features
+            for col in poly_df.columns:
+                if col in scaler_poly2_dict:
+                    original_val = poly_df.loc[0, col]
+                    scaled_val = scaler_poly2_dict[col].transform([[original_val]])[0][0]
+                    poly_df.loc[0, col] = scaled_val
+                    print(f"  Poly {col}: {original_val:.2f} -> {scaled_val:.4f}")
+            
+            # Bước 4: Kết hợp tất cả features
+            input_df = pd.concat([input_df, poly_df], axis=1)
+            
+            # Đảm bảo đúng thứ tự cột
+            input_df = input_df[FEATURE_COLUMNS_ORDER]
+            
+        else:
+            # Multiple/Ridge/Lasso Regression
+            print(f"\n🔵 Using {best_model_name}")
+            
+            # Tạo DataFrame với đúng cột và thứ tự
+            input_df = pd.DataFrame(columns=FEATURE_COLUMNS_ORDER)
+            input_df.loc[0] = 0.0
+            
+            # Gán giá trị base
+            if 'Education_Encoded' in input_df.columns:
+                input_df.loc[0, 'Education_Encoded'] = float(edu_encoded)
+            if 'Age' in input_df.columns:
+                input_df.loc[0, 'Age'] = age
+            if 'Years of Experience' in input_df.columns:
+                input_df.loc[0, 'Years of Experience'] = years_exp
+            
+            # Polynomial features - SỬA TÊN CHO KHỚP
+            if 'Age_squared' in input_df.columns:
+                input_df.loc[0, 'Age_squared'] = age ** 2
+            if 'Exp_squared' in input_df.columns:
+                input_df.loc[0, 'Exp_squared'] = years_exp ** 2
+            if 'Education_x_Exp' in input_df.columns:
+                input_df.loc[0, 'Education_x_Exp'] = edu_encoded * years_exp
+            
+            # Scaling
+            print("\nScaling features:")
+            for col in scaler_dict.keys():
+                if col in input_df.columns:
+                    original_val = input_df.loc[0, col]
+                    scaled_val = scaler_dict[col].transform([[original_val]])[0][0]
+                    input_df.loc[0, col] = scaled_val
+                    print(f"  {col}: {original_val:.2f} -> {scaled_val:.4f}")
+            
+            # Gender encoding
+            if 'Gender_Male' in input_df.columns:
+                input_df.loc[0, 'Gender_Male'] = 1.0 if gender == 'Male' else 0.0
+            if 'Gender_Other' in input_df.columns:
+                input_df.loc[0, 'Gender_Other'] = 1.0 if gender == 'Other' else 0.0
+            
+            # Job encoding
+            job_grouped = job if job in top_n_jobs else 'Other'
+            print(f"\nJob encoding: '{job}' -> '{job_grouped}'")
+            for col in input_df.columns:
+                if col.startswith('Job_'):
+                    job_name = col[4:]
+                    input_df.loc[0, col] = 1.0 if job_name == job_grouped else 0.0
 
-        if 'Age' in input_df.columns:
-            input_df.loc[0, 'Age'] = age
-        if 'Years of Experience' in input_df.columns:
-            input_df.loc[0, 'Years of Experience'] = years_exp
-        if 'Age^2' in input_df.columns:
-            input_df.loc[0, 'Age^2'] = age ** 2
-        if 'Years of Experience^2' in input_df.columns:
-            input_df.loc[0, 'Years of Experience^2'] = years_exp ** 2
-        if 'Age Years of Experience' in input_df.columns:
-            input_df.loc[0, 'Age Years of Experience'] = age * years_exp
-
-        if 'Age_squared' in input_df.columns:
-            input_df.loc[0, 'Age_squared'] = age ** 2
-        if 'Exp_squared' in input_df.columns:
-            input_df.loc[0, 'Exp_squared'] = years_exp ** 2
-        if 'Education_x_Exp' in input_df.columns:
-            input_df.loc[0, 'Education_x_Exp'] = edu_encoded * years_exp
-
-        print("\nScaling features:")
-        for col in scaler_dict.keys():
-            if col in input_df.columns:
-                original_val = input_df.loc[0, col]
-                scaled_val = scaler_dict[col].transform([[original_val]])[0][0]
-                input_df.loc[0, col] = scaled_val
-                print(f"  {col}: {original_val:.2f} -> {scaled_val:.4f}")
-
-        if 'Gender_Male' in input_df.columns:
-            input_df.loc[0, 'Gender_Male'] = 1.0 if gender == 'Male' else 0.0
-        if 'Gender_Other' in input_df.columns:
-            input_df.loc[0, 'Gender_Other'] = 1.0 if gender == 'Other' else 0.0
-
-        job_grouped = job if job in top_n_jobs else 'Other'
-        print(f"\nJob encoding: '{job}' -> '{job_grouped}'")
-        
-        for col in input_df.columns:
-            if col.startswith('Job_'):
-                job_name = col[4:]  
-                input_df.loc[0, col] = 1.0 if job_name == job_grouped else 0.0
-
+        # ========================================================================
+        # DỰ ĐOÁN
+        # ========================================================================
         print(f"\nDataFrame ready:")
         print(f"  Shape: {input_df.shape}")
         print(f"  Columns match: {list(input_df.columns) == FEATURE_COLUMNS_ORDER}")
@@ -169,7 +237,7 @@ def predict_salary():
         prediction = model.predict(input_df)
         result = round(float(prediction[0]), 2)
         
-        print(f"\nPrediction: ${result:,.2f}")
+        print(f"\n✓ Prediction: ${result:,.2f}")
         print("="*70 + "\n")
         
         return jsonify({'predicted_salary': result})
